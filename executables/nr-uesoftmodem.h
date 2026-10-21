@@ -26,6 +26,8 @@ extern uint16_t ue_id_g;
 #define  CONFIG_HLP_FREQ_SYNC_P            "coefficient for Proportional part of continuous frequency offset compensation PI controller\n"
 #define  CONFIG_HLP_FREQ_SYNC_I            "coefficient for Integrating part of continuous frequency offset compensation PI controller\n"
 #define  CONFIG_HLP_CONT_FO_COMP           "Enable continuous frequency offset (FO) estimation and (pre-)compensation and specify main FO source (1 = local oscillator, 2 = Doppler shift, 3 = Don't consider residual DL FO in UL FO pre-compensation)\n"
+#define  CONFIG_HLP_VBK_CP_FFO            "Use the Van de Beek cyclic-prefix fractional frequency offset estimator at initial sync instead of OAI's PSS half-symbol estimator (needs --ue-fo-compensation)\n"
+#define  CONFIG_HLP_FFO_LOG               "Append every fractional frequency offset estimate (BOTH estimators) to this CSV file, for offline comparison\n"
 #define  CONFIG_HLP_AGC                    "Rx Gain control used for UE\n"
 #define  CONFIG_HLP_NUM_UL_ACTORS          "Number of UL actors to use. Set to 0 to disable UL actor framework and do processing inline\n"
 #define  CONFIG_HLP_NUM_DL_ACTORS          "Number of DL actors to use. Set to 0 to disable DL actor framework and do processing inline\n"
@@ -81,6 +83,8 @@ extern uint16_t ue_id_g;
   {"freq-sync-I",                  CONFIG_HLP_FREQ_SYNC_I,     0,               .dblptr=&(nrUE_params.freq_sync_I),          .defdblval=0.001,  TYPE_DOUBLE,   0}, \
   {"cont-fo-comp",                 CONFIG_HLP_CONT_FO_COMP,    0,               .iptr=&(nrUE_params.cont_fo_comp),           .defintval=0,      TYPE_INT,      0}, \
   {"agc",                          CONFIG_HLP_AGC,             PARAMFLAG_BOOL,  .iptr=&(nrUE_params.agc),                    .defintval=0,      TYPE_INT,      0}, \
+  {"vbk-cp-ffo",                   CONFIG_HLP_VBK_CP_FFO,      PARAMFLAG_BOOL,  .iptr=&(nrUE_params.vbk_cp_ffo),             .defintval=0,      TYPE_INT,      0}, \
+  {"ffo-log",                      CONFIG_HLP_FFO_LOG,         0,               .strptr=&(nrUE_params.ffo_log),              .defstrval=NULL,   TYPE_STRING,   0}, \
   {"num-ul-actors",                CONFIG_HLP_NUM_UL_ACTORS,   0,               .iptr=&nrUE_params.num_ul_actors,            .defintval=2,      TYPE_INT,      0}, \
   {"num-dl-actors",                CONFIG_HLP_NUM_DL_ACTORS,   0,               .iptr=&nrUE_params.num_dl_actors,            .defintval=4,      TYPE_INT,      0}, \
   {"actor-affinity",               CONFIG_HLP_ACTOR_AFFINITY,  0,               .strptr=&nrUE_params.actor_affinity,         .defstrval=NULL,   TYPE_STRING,   0}, \
@@ -115,6 +119,8 @@ typedef struct {
   double freq_sync_I;
   int cont_fo_comp;
   int agc;
+  int vbk_cp_ffo;  /* 1 = Van de Beek CP estimator, 0 (default) = OAI PSS half-symbol estimator */
+  char *ffo_log;   /* CSV path for FFO estimator comparison logging, NULL = disabled */
   char *usrp_args;
   char *tx_subdev;
   char *rx_subdev;
