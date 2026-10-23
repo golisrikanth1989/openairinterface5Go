@@ -213,7 +213,7 @@ static void ffo_log_row(bool fo_flag,
                         int avg_db,
                         int ffo_oai_hz,
                         int ffo_vdb_hz,
-                        int ffo_pre_hz,
+                        int ffo_coarse_hz,
                         int ffo_used_hz,
                         int use_vdb,
                         int scs_hz,
@@ -244,7 +244,7 @@ static void ffo_log_row(bool fo_flag,
     if (ftell(ffo_log_fd) == 0)
       fprintf(ffo_log_fd,
               "t_us,nid2,pss_pos,peak_db,avg_db,corr_db,"
-              "ffo_oai_hz,ffo_vdb_hz,ffo_pre_hz,ffo_used_hz,"
+              "ffo_oai_hz,ffo_vdb_hz,ffo_coarse_hz,ffo_used_hz,"
               "eps_oai,eps_vdb,method,scs_hz,fft_size,ncp\n");
   }
 
@@ -262,7 +262,7 @@ static void ffo_log_row(bool fo_flag,
           peak_db - avg_db,
           ffo_oai_hz,
           ffo_vdb_hz,
-          ffo_pre_hz,
+          ffo_coarse_hz,
           ffo_used_hz,
           scs_hz ? (double)ffo_oai_hz / scs_hz : 0.0,
           scs_hz ? (double)ffo_vdb_hz / scs_hz : 0.0,
@@ -341,6 +341,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
                                       .nb_prefix_samples = params->nb_prefix_samples,
                                       .subcarrier_spacing = params->subcarrier_spacing,
                                       .fo_flag = params->fo_flag,
+                                      .coarse_fo = params->coarse_fo,
                                       .target_Nid_cell = params->target_nid_cell,
                                       .pssTime = (c16_t *)pssTime};
   nr_pss_info_t pss_info = pss_search_time_nr(&p_pss);
@@ -378,21 +379,40 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
       return false;
     }
 
+    // Coarse (integer) frequency offset from the PSS hypothesis search (--coarse-fo).
+    // It must be removed BEFORE the fractional estimators run: both are phase
+    // estimators with a range of at most one subcarrier, so an uncorrected integer
+    // part simply wraps them. The PSS half-symbol estimate above is already clean,
+    // because pss_search_time_nr() measured it against the winning rotated replica;
+    // the CP estimator reads raw rxdata, so de-rotate the samples here first.
+    const int freq_offset_coarse = pss_res->coarse_offset_hz;
+    if (freq_offset_coarse != 0) {
+      compensate_freq_offset(params->rxdata,
+                             params->nb_antennas_rx,
+                             params->rxdata_size,
+                             freq_offset_coarse,
+                             params->sampling_rate);
+      f_off_already_applied += freq_offset_coarse;
+      LOG_I(PHY, "coarse FO: removed %+d Hz (%+d subcarriers) before fractional estimation\n",
+            freq_offset_coarse, freq_offset_coarse / params->subcarrier_spacing);
+    }
+
     // Fractional frequency offset: OAI's PSS half-symbol estimator (default) or the
     // Van de Beek cyclic-prefix estimator (--vbk-cp-ffo). Both are computed whenever
     // --ffo-log is given, so that a single run yields directly comparable data.
     int freq_offset_vdb = 0;
     if (params->fo_flag && (use_vdb || ffo_logging)) {
       // the SSB is known to fit in the buffer at this point (checked just above)
-      freq_offset_vdb = f_off_already_applied
-                        + estimate_ffo_vdb_cp(params->rxdata,
-                                              params->nb_antennas_rx,
-                                              ssb_time_offset,
-                                              params->ofdm_symbol_size,
-                                              params->nb_prefix_samples,
-                                              params->subcarrier_spacing);
+      freq_offset_vdb = estimate_ffo_vdb_cp(params->rxdata,
+                                            params->nb_antennas_rx,
+                                            ssb_time_offset,
+                                            params->ofdm_symbol_size,
+                                            params->nb_prefix_samples,
+                                            params->subcarrier_spacing);
     }
-    const int freq_offset_used = use_vdb ? freq_offset_vdb : freq_offset_pss;
+    // total = integer part + fractional part
+    const int freq_offset_used =
+        freq_offset_coarse + (use_vdb ? freq_offset_vdb : freq_offset_pss);
 
     ffo_log_row(params->fo_flag,
                 pss_res->nid2,
@@ -401,15 +421,16 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
                 pss_res->avg,
                 freq_offset_pss,
                 freq_offset_vdb,
-                f_off_already_applied,
+                freq_offset_coarse,
                 freq_offset_used,
                 use_vdb,
                 params->subcarrier_spacing,
                 params->ofdm_symbol_size,
                 params->nb_prefix_samples);
 
-    LOG_D(PHY,
-          "FFO estimates: OAI PSS half-symbol %d Hz, Van de Beek CP %d Hz, using %s -> %d Hz\n",
+    LOG_I(PHY,
+          "FO estimates: coarse %+d Hz, OAI PSS half-symbol %+d Hz, Van de Beek CP %+d Hz, using %s -> total %+d Hz\n",
+          freq_offset_coarse,
           freq_offset_pss,
           freq_offset_vdb,
           use_vdb ? "vdb_cp" : "oai_pss",
@@ -418,9 +439,9 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     // the rest of the chain (SSS refinement, accumulated freqOffset) uses pss_res->freq_offset
     pss_res->freq_offset = freq_offset_used;
 
-    // Apply frequency offset compensation if requested
-    if (params->apply_freq_offset && freq_offset_used != 0) {
-      f_off_to_comp += freq_offset_used;
+    // Apply the remaining (fractional) compensation; the coarse part is already out
+    if (params->apply_freq_offset && (freq_offset_used - freq_offset_coarse) != 0) {
+      f_off_to_comp += freq_offset_used - freq_offset_coarse;
       compensate_freq_offset(params->rxdata, params->nb_antennas_rx, params->rxdata_size, f_off_to_comp, params->sampling_rate);
       f_off_to_comp *= -1;
       f_off_already_applied = freq_offset_used;
@@ -509,6 +530,7 @@ static void nr_scan_ssb(void *arg)
       .num_exclude_nid_cells = 0,
       .apply_freq_offset = ssbInfo->foFlag,
       .fo_flag = ssbInfo->foFlag,
+      .coarse_fo = get_nrUE_params()->coarse_fo,
       .rxdataF = rxdataF,
       .pssTime = pssTime,
   };

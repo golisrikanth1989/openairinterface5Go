@@ -511,7 +511,8 @@ typedef struct {
   bool success;
   int pos;
   int nid2;
-  int freq_offset; // PSS frequency offset estimate
+  int freq_offset; // PSS frequency offset estimate (fractional)
+  int coarse_offset_hz; // integer-CFO estimate from the PSS hypothesis search (--coarse-fo)
   int peak; // PSS correlation peak power
   int avg; // PSS correlation average power
 } pss_detection_result_t;
@@ -547,6 +548,7 @@ typedef struct {
   int num_exclude_nid_cells; // Number of PCIs in exclude_nid_cells array
   bool apply_freq_offset; // whether to compensate frequency offset
   bool fo_flag; // frequency offset estimation flag for pss_synchro_nr()
+  int coarse_fo; // integer-CFO search range in subcarriers (--coarse-fo), 0 = disabled
   void *rxdataF; // Pre-allocated rxdataF buffer
   void *pssTime; // Pre-generated PSS time sequences
   // Output parameters

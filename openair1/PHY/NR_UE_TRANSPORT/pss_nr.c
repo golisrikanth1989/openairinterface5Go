@@ -168,6 +168,38 @@ static int cmp_pss_peak(const void *a, const void *b)
 *
 *********************************************************************/
 
+/*
+ * Integer (coarse) CFO search, enabled with --coarse-fo N.
+ *
+ * An integer offset of m subcarriers shifts the received spectrum by m bins,
+ * which in the time domain is a multiplication by exp(j2*pi*m*n/N). The PSS
+ * correlation sum then becomes sum |p(n)|^2 exp(j2*pi*m*n/N), i.e. the DFT of
+ * |p|^2 evaluated at bin m, which is ~0 for m != 0: the correlation collapses
+ * and the UE cannot acquire at all. (Measured at band n28: with the raw
+ * 17.6 kHz = 1.18 SCS offset the UE logs 628 sync failures and never syncs.)
+ *
+ * Rather than de-rotating the whole rx buffer once per hypothesis, rotate the
+ * REPLICA, which is only ofdm_symbol_size samples:
+ *     replica_m(n) = pssTime(n) * exp(j2*pi*m*n/N)
+ * Correlating against replica_m then peaks when m equals the true integer
+ * offset, because
+ *     sum conj(replica_m) r = sum |p|^2 exp(j2*pi*(eps-m)n/N).
+ * The search costs (2N+1) times the normal PSS search, at acquisition only.
+ */
+static void pss_rotate_replica(const c16_t *in, c16_t *out, int len, int m)
+{
+  if (m == 0) {
+    memcpy(out, in, len * sizeof(c16_t));
+    return;
+  }
+  for (int n = 0; n < len; n++) {
+    const double ph = 2.0 * M_PI * (double)m * (double)n / (double)len;
+    const double c = cos(ph), si = sin(ph);
+    out[n].r = (int16_t)lround(in[n].r * c - in[n].i * si);
+    out[n].i = (int16_t)lround(in[n].r * si + in[n].i * c);
+  }
+}
+
 nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
 {
   if (p->rxdata_length <= p->ofdm_symbol_size) {
@@ -189,33 +221,43 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
   }
   int pss_count = 0;
   nr_pss_info_t pss_info = {0};
+  /* --coarse-fo N searches m in [-N, +N] subcarriers; 0 keeps the single m = 0 pass */
+  const int coarse_range = p->coarse_fo > 0 ? p->coarse_fo : 0;
+  c16_t replica[p->ofdm_symbol_size];
   for (int nid2 = pss_start; nid2 < pss_end; nid2++) {
     int64_t peak_value = 0;
     int peak_position = 0;
+    int peak_coarse = 0;
     int64_t sum = 0;
+    int64_t sum_count = 0;
     const int trials = (p->rxdata_length - p->ofdm_symbol_size) / PSS_STEP + 1;
-    for (int n = 0; n < trials; n++) {
-      const int start = n * PSS_STEP;
-      int64_t pss_corr_ue = 0;
-      for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
-        /* perform correlation of rx data and pss sequence ie it is a dot product */
-        const c32_t result = dot_product(pssTime[nid2], p->rxdata[ar] + start, p->ofdm_symbol_size, SCALING_PSS_NR);
-        const c64_t r64 = {.r = result.r, .i = result.i};
-        pss_corr_ue += squaredMod(r64);
-      }
+    for (int m = -coarse_range; m <= coarse_range; m++) {
+      pss_rotate_replica(pssTime[nid2], replica, p->ofdm_symbol_size, m);
+      for (int n = 0; n < trials; n++) {
+        const int start = n * PSS_STEP;
+        int64_t pss_corr_ue = 0;
+        for (int ar = 0; ar < p->nb_antennas_rx; ar++) {
+          /* perform correlation of rx data and pss sequence ie it is a dot product */
+          const c32_t result = dot_product(replica, p->rxdata[ar] + start, p->ofdm_symbol_size, SCALING_PSS_NR);
+          const c64_t r64 = {.r = result.r, .i = result.i};
+          pss_corr_ue += squaredMod(r64);
+        }
 
-      /* calculate the absolute value of sync_corr[n] */
-      sum += pss_corr_ue;
-      if (pss_corr_ue > peak_value) {
-        peak_value = pss_corr_ue;
-        peak_position = start;
+        /* calculate the absolute value of sync_corr[n] */
+        sum += pss_corr_ue;
+        sum_count++;
+        if (pss_corr_ue > peak_value) {
+          peak_value = pss_corr_ue;
+          peak_position = start;
+          peak_coarse = m;
 #ifdef DEBUG_PSS_NR
-        LOG_I(NR_PHY, "nid2 %d: n %6u peak_value %li\n", nid2, peak_position, pss_corr_ue);
+          LOG_I(NR_PHY, "nid2 %d: m %+d n %6u peak_value %li\n", nid2, m, peak_position, pss_corr_ue);
 #endif
+        }
       }
     }
-
-    int64_t avg = sum / (trials * p->nb_antennas_rx);
+DISTRIBUTORS
+    int64_t avg = sum / (sum_count * p->nb_antennas_rx);
     peak_value /= p->nb_antennas_rx;
     bool pss_found =
         peak_position >= p->nb_prefix_samples // if peak position is in first samples, we can't make the iDFT for SSS detection
@@ -229,18 +271,35 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
         .success = pss_found,
     };
 
+    /* integer offset in Hz; 0 when --coarse-fo is off, since only m = 0 was tried */
+    pss_info.pss_elem_info[pss_count].coarse_offset_hz = peak_coarse * p->subcarrier_spacing;
+    if (coarse_range && pss_found)
+      LOG_I(NR_PHY,
+            "coarse FO search: nid2 %d, best integer offset %+d SCS = %+d Hz (peak %d dB over avg %d dB)\n",
+            nid2,
+            peak_coarse,
+            peak_coarse * p->subcarrier_spacing,
+            dB_fixed64(peak_value),
+            dB_fixed64(avg));
+
     pss_info.pss_elem_info[pss_count].freq_offset = 0;
     if (p->fo_flag && pss_info.pss_elem_info[pss_count].success) {
       // fractional frequency offset computation according to Cross-correlation Synchronization Algorithm Using PSS
       // Shoujun Huang, Yongtao Su, Ying He and Shan Tang, "Joint time and frequency offset estimation in LTE downlink," 7th
       // International Conference on Communications and Networking in China, 2012.
 
+      // Rebuild the replica for the WINNING integer hypothesis, so that what is
+      // measured here is the fractional residual only. Without this the integer
+      // part would still be present and the half-symbol phase would wrap.
+      // With --coarse-fo off, peak_coarse is 0 and this is the plain replica.
+      pss_rotate_replica(pssTime[nid2], replica, p->ofdm_symbol_size, peak_coarse);
+
       // Computing cross-correlation at peak on half the symbol size for first half of data
       const c16_t *rx_peak = &p->rxdata[0][peak_position];
-      c32_t r1 = dot_product(pssTime[nid2], rx_peak, p->ofdm_symbol_size >> 1, SCALING_PSS_NR);
+      c32_t r1 = dot_product(replica, rx_peak, p->ofdm_symbol_size >> 1, SCALING_PSS_NR);
       // Computing cross-correlation at peak on half the symbol size for data shifted by half symbol size
       // as it is real and complex it is necessary to shift by a value equal to symbol size to obtain such shift
-      c32_t r2 = dot_product(pssTime[nid2] + (p->ofdm_symbol_size >> 1),
+      c32_t r2 = dot_product(replica + (p->ofdm_symbol_size >> 1),
                              rx_peak + (p->ofdm_symbol_size >> 1),
                              p->ofdm_symbol_size >> 1,
                              SCALING_PSS_NR);
