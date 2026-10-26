@@ -3090,7 +3090,9 @@ NR_BCCH_DL_SCH_Message_t *get_SIB1_NR(const NR_ServingCellConfigCommon_t *scc,
       *sib1_1700->intraFreqReselectionRedCap_r17 = redcap_config->intraFreqReselectionRedCap_r17;
     }
 
-    if (is_ntn_band(band)) {
+    // Also on a non-NTN band when the cell has an NTN-Config: lab NTN on a TN band (n28),
+    // where the UE otherwise starts RA before SIB19 (LEOPass 5G-Nanosatellite, 2026-10-17).
+    if (is_ntn_band(band) || (scc->ext2 && scc->ext2->ntn_Config_r17)) {
       // If cell provides NTN access, set cellBarredNTN to notBarred.
       asn1cCallocOne(sib1_1700->cellBarredNTN_r17, NR_SIB1_v1700_IEs__cellBarredNTN_r17_notBarred);
     }
