@@ -764,7 +764,8 @@ static int startServer(openair0_device_t *device)
 
   struct addrinfo hints = {
       .ai_flags = AI_PASSIVE,
-      .ai_family = AF_INET6,
+      // dual-stack IPv6 socket first; plain IPv4 on hosts without IPv6
+      .ai_family = AF_UNSPEC,
       .ai_socktype = SOCK_STREAM,
   };
 
@@ -783,7 +784,8 @@ static int startServer(openair0_device_t *device)
       continue;
     }
 
-    if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &disable, sizeof(int)) != 0) {
+    if (rp->ai_family == AF_INET6 && setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &disable, sizeof(int)) != 0) {
+      close(sock);
       continue;
     }
 

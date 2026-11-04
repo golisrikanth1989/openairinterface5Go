@@ -31,6 +31,7 @@ typedef struct {
   int nb_prefix_samples;
   int subcarrier_spacing;
   bool fo_flag;
+  int coarse_fo; /* integer-CFO search range in subcarriers, 0 = disabled */
   int target_Nid_cell;
   c16_t *pssTime;
 } pss_search_t;

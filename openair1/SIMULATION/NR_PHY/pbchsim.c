@@ -173,7 +173,7 @@ int main(int argc, char **argv)
 
   int enable_pss_cfo_search = 0;
   int c;
-  while ((c = getopt(argc, argv, "--:O:c:F:g:hIL:m:M:n:N:o:P:QR:s:S:T:x:y:z:")) != -1) {
+  while ((c = getopt(argc, argv, "--:O:c:F:g:hIK:L:m:M:n:N:o:P:QR:s:S:T:x:Yy:z:")) != -1) {
     /* ignore long options starting with '--', option '-O' and their arguments that are handled by configmodule */
     /* with this opstring getopt returns 1 for non-option arguments, refer to 'man 3 getopt' */
     if (c == 1 || c == '-' || c == 'O')
@@ -303,6 +303,14 @@ int main(int argc, char **argv)
       enable_pss_cfo_search = 1;
       break;
 
+    case 'K':
+      nrUE_params.coarse_fo = atoi(optarg);
+      break;
+
+    case 'Y':
+      nrUE_params.cp_ffo = 1;
+      break;
+
     case 'R':
       N_RB_DL = atoi(optarg);
       break;
@@ -389,6 +397,8 @@ int main(int argc, char **argv)
       //printf("-p Use extended prefix mode\n");
       printf("-P PBCH phase, allowed values 0-3\n");
       printf("-Q Enable the experimental CFO-PSS Stage 1 detector\n");
+      printf("-K Integer CFO search range in subcarriers (--coarse-fo of ffo_method_test), 0 = off\n");
+      printf("-Y Use the CP fractional CFO estimator (--cp-ffo)\n");
       printf("-R N_RB_DL\n");
       printf("-s Starting SNR, runs from SNR0 to SNR0 + 10 dB if not -S given. If -n 1, then just SNR is simulated\n");
       printf("-S Ending SNR, runs from SNR0 to SNR1\n");
@@ -415,7 +425,9 @@ int main(int argc, char **argv)
             "pss_freq_offset_hz,sss_success,sss_nid_cell,sss_metric,"
             "sss_second_metric,sss_phase,sss_freq_offset_hz,pbch_attempted,pbch_success,"
             "pbch_dmrs_best_metric,pbch_dmrs_second_metric,pbch_decode_attempts,"
-            "initial_freq_offset_hz,total_freq_offset_hz,rng_seed,pci_tx\n");
+            "initial_freq_offset_hz,total_freq_offset_hz,rng_seed,pci_tx,"
+            "cfo_method,est_coarse_hz,est_fine_hz,est_ffo_pss_hz,est_ffo_cp_hz,est_pss_stage_hz\n");
+    nrUE_params.initial_sync_trace = 1;
   }
 
   randominit();
@@ -692,7 +704,7 @@ int main(int argc, char **argv)
           fprintf(trace_fd,
                   "%d,%.1f,%.0f,%d,%d,%s,%d,%d,%d,%d,%d,%" PRIu64 ",%" PRIu64 ",%" PRIu64
                   ",%d,%d,%d,%" PRIu64 ",%d,%d,%d"
-                  ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%" PRIu64 ",%" PRIu64 ",%d,%d,%d,%s,%u\n",
+                  ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%" PRIu64 ",%" PRIu64 ",%d,%d,%d,%s,%u,%s,%d,%d,%d,%d,%d\n",
                   trial,
                   SNR,
                   cfo,
@@ -729,7 +741,13 @@ int main(int argc, char **argv)
                   ret.trace.initial_freq_offset,
                   ret.trace.total_freq_offset,
                   getenv("OAI_RNGSEED") != NULL ? getenv("OAI_RNGSEED") : "",
-                  Nid_cell);
+                  Nid_cell,
+                  ret.trace.cfo_method ? ret.trace.cfo_method : "none",
+                  ret.trace.est_coarse_hz,
+                  ret.trace.est_fine_hz,
+                  ret.trace.est_ffo_pss_hz,
+                  ret.trace.est_ffo_cp_hz,
+                  ret.trace.est_pss_stage_hz);
         }
         if (!ret.cell_detected)
           n_errors++;

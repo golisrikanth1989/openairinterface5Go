@@ -159,6 +159,132 @@ static void compensate_freq_offset(c16_t **x, const int nb_antennas_rx, const in
   }
 }
 
+/*
+ * Van de Beek / Sandell / Boerjesson cyclic-prefix fractional frequency offset estimator.
+ * (J.J. van de Beek et al., "ML estimation of time and frequency offset in OFDM systems",
+ *  IEEE Trans. Signal Process., vol. 45, no. 7, 1997.)
+ *
+ * The CP of each OFDM symbol is a copy of that symbol's last Ncp samples, i.e. the same
+ * samples seen N samples apart.  A CFO eps (in units of the SCS) rotates the later copy by
+ *      r(n + N) = r(n) * exp(j*2*pi*eps)
+ * so the conjugate product has the data magnitude (real, positive) and the CFO phase only:
+ *      conj(r(n)) * r(n + N) = |s(n)|^2 * exp(j*2*pi*eps)
+ * Accumulating over the Ncp CP samples of the 4 SSB symbols (PSS, PBCH, SSS, PBCH) and
+ * taking the angle gives 2*pi*eps, hence the division by 2*pi (OAI's PSS half-symbol
+ * estimator uses a lag of N/2, giving pi*eps and a division by pi instead).
+ *
+ * Lag N -> unambiguous range |eps| < 0.5, i.e. +-SCS/2 (half that of the PSS estimator),
+ * but twice the phase per Hz, so roughly twice the accuracy at the same SNR.
+ *
+ * Returns the estimate in Hz.  rxdata must still carry the offset to be measured; any
+ * offset already compensated in rxdata has to be added back by the caller.
+ */
+static int estimate_ffo_cp(c16_t **rxdata,
+                               int nb_antennas_rx,
+                               int ssb_time_offset,
+                               int ofdm_symbol_size,
+                               int nb_prefix_samples,
+                               int subcarrier_spacing)
+{
+  const int N = ofdm_symbol_size;
+  const int Ncp = nb_prefix_samples;
+  const int L = N + Ncp; // one OFDM symbol, CP included
+  double acc_re = 0.0, acc_im = 0.0;
+
+  for (int ar = 0; ar < nb_antennas_rx; ar++) {
+    for (int m = 0; m < NR_N_SYMBOLS_SSB; m++) {
+      const c16_t *sym = &rxdata[ar][ssb_time_offset + m * L];
+      for (int n = 0; n < Ncp; n++) {
+        const c16_t a = sym[n]; // CP sample
+        const c16_t b = sym[n + N]; // the same sample N later (end of the useful part)
+        acc_re += (double)a.r * b.r + (double)a.i * b.i; // Re{conj(a) * b}
+        acc_im += (double)a.r * b.i - (double)a.i * b.r; // Im{conj(a) * b}
+      }
+    }
+  }
+
+  if (acc_re == 0.0 && acc_im == 0.0)
+    return 0;
+
+  return (int)lround(subcarrier_spacing * atan2(acc_im, acc_re) / (2 * M_PI));
+}
+
+/*
+ * Optional CSV log of both FFO estimators, enabled with --ffo-log <file>.
+ * One row per PSS candidate per sync attempt; the file is opened on first use and
+ * a header row is written when the file is created.
+ */
+static FILE *ffo_log_fd = NULL;
+static pthread_mutex_t ffo_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void ffo_log_row(bool fo_flag,
+                        int nid2,
+                        int pss_pos,
+                        int peak_db,
+                        int avg_db,
+                        int ffo_oai_hz,
+                        int ffo_cp_hz,
+                        int ffo_coarse_hz,
+                        int ffo_used_hz,
+                        int use_cp,
+                        int scs_hz,
+                        int fft_size,
+                        int ncp)
+{
+  const char *path = get_nrUE_params()->ffo_log;
+  if (path == NULL)
+    return;
+
+  // Both estimators are gated on fo_flag, so with it off every estimate column
+  // would be 0. Log only rows where a value was actually computed. This also
+  // drops the neighbour-cell search, which calls nr_search_ssb_common() with
+  // fo_flag = false (nr_ue_measurements.c) and runs continuously once the UE is
+  // connected -- it would otherwise bury the real sync rows under hundreds of
+  // empty ones.
+  if (!fo_flag)
+    return;
+
+  pthread_mutex_lock(&ffo_log_lock);
+  if (ffo_log_fd == NULL) {
+    ffo_log_fd = fopen(path, "a");
+    if (ffo_log_fd == NULL) {
+      LOG_E(PHY, "could not open FFO log file %s\n", path);
+      pthread_mutex_unlock(&ffo_log_lock);
+      return;
+    }
+    if (ftell(ffo_log_fd) == 0)
+      fprintf(ffo_log_fd,
+              "t_us,nid2,pss_pos,peak_db,avg_db,corr_db,"
+              "ffo_oai_hz,ffo_cp_hz,ffo_coarse_hz,ffo_used_hz,"
+              "eps_oai,eps_cp,method,scs_hz,fft_size,ncp\n");
+  }
+
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  const uint64_t t_us = (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+
+  fprintf(ffo_log_fd,
+          "%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.6f,%.6f,%s,%d,%d,%d\n",
+          (unsigned long)t_us,
+          nid2,
+          pss_pos,
+          peak_db,
+          avg_db,
+          peak_db - avg_db,
+          ffo_oai_hz,
+          ffo_cp_hz,
+          ffo_coarse_hz,
+          ffo_used_hz,
+          scs_hz ? (double)ffo_oai_hz / scs_hz : 0.0,
+          scs_hz ? (double)ffo_cp_hz / scs_hz : 0.0,
+          use_cp ? "cp" : "oai_pss",
+          scs_hz,
+          fft_size,
+          ncp);
+  fflush(ffo_log_fd); // flush per row: the UE may be killed with Ctrl-C mid-run
+  pthread_mutex_unlock(&ffo_log_lock);
+}
+
 /* rxdataF should be 16 bytes aligned */
 static void generate_table(nr_ssb_search_params_t *params,
                            c16_t timeshift_symbol_rotation[params->ofdm_symbol_size],
@@ -227,10 +353,11 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
                                       .nb_prefix_samples = params->nb_prefix_samples,
                                       .subcarrier_spacing = params->subcarrier_spacing,
                                       .fo_flag = params->fo_flag,
+                                      .coarse_fo = params->coarse_fo,
                                       .target_Nid_cell = params->target_nid_cell,
                                       .pssTime = (c16_t *)pssTime};
   nr_pss_info_t pss_info = {0};
-  if (params->pss_cfo_search.enabled && params->target_nid_cell == -1) {
+  if (params->pss_cfo_search.enabled) {
     if (!params->apply_freq_offset) {
       LOG_E(PHY, "CFO-PSS search requires frequency-offset compensation\n");
       params->pss_res = (pss_detection_result_t){.success = false, .pos = -1};
@@ -252,9 +379,15 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
         .ofdm_symbol_size = params->ofdm_symbol_size,
         .pss_time = {pss_references[0], pss_references[1], pss_references[2]},
         .sampling_rate_hz = params->sampling_rate,
+        .targeted = params->target_nid_cell != -1,
+        .target_nid2 = params->target_nid_cell != -1 ? params->target_nid_cell % NUMBER_PSS_SEQUENCE : -1,
     };
     const nr_pss_cfo_search_result_t stage1 = nr_pss_cfo_search_stage1(&stage1_search, &params->pss_cfo_search);
     params->pss_cfo_search_used = true;
+    params->cfo_method = "grid";
+    params->est_coarse_hz = stage1.coarse_cfo_hz;
+    params->est_fine_hz = stage1.fine_cfo_hz;
+    params->est_pss_stage_hz = stage1.pss.freq_offset;
     params->pss_cfo_coarse_hz = stage1.coarse_cfo_hz;
     params->pss_cfo_fine_hz = stage1.fine_cfo_hz;
     params->pss_second_timing_peak_raw = stage1.second_timing_peak_raw;
@@ -267,22 +400,32 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
       return false;
     }
     pss_info.pss_elem_info[0] = stage1.pss;
-    LOG_D(PHY,
-          "CFO-PSS Stage 1 selected coarse %d Hz, fine %d Hz, total %d Hz, NID2 %d, position %d\n",
+    LOG_D(NR_PHY,
+          "CFO-EST method=grid nid2=%d pos=%d coarse=%+d fine=%+d pss_stage=%+d peak_db=%d avg_db=%d hypotheses=%d\n",
+          stage1.pss.nid2,
+          stage1.pss.pos,
           stage1.coarse_cfo_hz,
           stage1.fine_cfo_hz,
           stage1.pss.freq_offset,
-          stage1.pss.nid2,
-          stage1.pss.pos);
+          stage1.pss.peak,
+          stage1.pss.avg,
+          (params->target_nid_cell != -1 ? 1 : NUMBER_PSS_SEQUENCE) * stage1.coarse_bins_evaluated + stage1.fine_bins_evaluated);
   } else {
-    if (params->pss_cfo_search.enabled)
-      LOG_D(PHY, "Using original PSS detector for targeted cell search\n");
     pss_info = pss_search_time_nr(&p_pss);
+    const bool cp = get_nrUE_params()->cp_ffo != 0;
+    params->cfo_method = params->coarse_fo > 0 ? (cp ? "int_cp" : "int_pss") : (cp ? "cp" : "pss");
   }
 
   // This is the frequency offset that will be applied in the compensation,
   // and it takes into account the values already applied previously during the loop.
   int f_off_to_comp = 0;
+  // Net frequency shift currently applied to params->rxdata (0 on the first iteration).
+  // The CP estimator measures what is left in the samples, so this has to be added back.
+  int f_off_already_applied = 0;
+  const bool use_cp = get_nrUE_params()->cp_ffo != 0;
+  // the CP estimate is cheap: compute it whenever a trace is requested, so each attempt
+  // carries both fractional estimators measured on the same samples
+  const bool ffo_logging = get_nrUE_params()->ffo_log != NULL || get_nrUE_params()->initial_sync_trace;
 
   for (int p = 0; p < NUMBER_PSS_SEQUENCE; p++) {
     pss_detection_result_t *pss_res = &pss_info.pss_elem_info[p];
@@ -312,11 +455,84 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
       return false;
     }
 
-    // Apply frequency offset compensation if requested
-    if (params->apply_freq_offset && freq_offset_pss != 0) {
-      f_off_to_comp += freq_offset_pss;
+    // Coarse (integer) frequency offset from the PSS hypothesis search (--coarse-fo).
+    // It must be removed BEFORE the fractional estimators run: both are phase
+    // estimators with a range of at most one subcarrier, so an uncorrected integer
+    // part simply wraps them. The PSS half-symbol estimate above is already clean,
+    // because pss_search_time_nr() measured it against the winning rotated replica;
+    // the CP estimator reads raw rxdata, so de-rotate the samples here first.
+    const int freq_offset_coarse = pss_res->coarse_offset_hz;
+    if (freq_offset_coarse != 0) {
+      compensate_freq_offset(params->rxdata,
+                             params->nb_antennas_rx,
+                             params->rxdata_size,
+                             freq_offset_coarse,
+                             params->sampling_rate);
+      f_off_already_applied += freq_offset_coarse;
+    }
+
+    // Fractional frequency offset: OAI's PSS half-symbol estimator (default) or the
+    // Van de Beek cyclic-prefix estimator (--cp-ffo). Both are computed whenever
+    // --ffo-log is given, so that a single run yields directly comparable data.
+    int freq_offset_cp = 0;
+    if (params->fo_flag && (use_cp || ffo_logging)) {
+      // the SSB is known to fit in the buffer at this point (checked just above)
+      freq_offset_cp = estimate_ffo_cp(params->rxdata,
+                                            params->nb_antennas_rx,
+                                            ssb_time_offset,
+                                            params->ofdm_symbol_size,
+                                            params->nb_prefix_samples,
+                                            params->subcarrier_spacing);
+    }
+    // total = integer part + fractional part
+    const int freq_offset_used =
+        freq_offset_coarse + (use_cp ? freq_offset_cp : freq_offset_pss);
+
+    ffo_log_row(params->fo_flag,
+                pss_res->nid2,
+                sync_pos,
+                pss_res->peak,
+                pss_res->avg,
+                freq_offset_pss,
+                freq_offset_cp,
+                freq_offset_coarse,
+                freq_offset_used,
+                use_cp,
+                params->subcarrier_spacing,
+                params->ofdm_symbol_size,
+                params->nb_prefix_samples);
+
+    if (!params->pss_cfo_search_used) {
+      params->est_coarse_hz = freq_offset_coarse;
+      params->est_fine_hz = use_cp ? freq_offset_cp : freq_offset_pss;
+      params->est_pss_stage_hz = freq_offset_used;
+      LOG_D(NR_PHY,
+            "CFO-EST method=%s nid2=%d pos=%d coarse=%+d fine=%+d pss_stage=%+d peak_db=%d avg_db=%d hypotheses=%d"
+            " ffo_pss=%+d ffo_cp=%+d\n",
+            params->cfo_method,
+            pss_res->nid2,
+            sync_pos,
+            freq_offset_coarse,
+            params->est_fine_hz,
+            freq_offset_used,
+            pss_res->peak,
+            pss_res->avg,
+            (params->target_nid_cell != -1 ? 1 : NUMBER_PSS_SEQUENCE) * (2 * params->coarse_fo + 1),
+            freq_offset_pss,
+            freq_offset_cp);
+    }
+    params->est_ffo_pss_hz = freq_offset_pss;
+    params->est_ffo_cp_hz = freq_offset_cp;
+
+    // the rest of the chain (SSS refinement, accumulated freqOffset) uses pss_res->freq_offset
+    pss_res->freq_offset = freq_offset_used;
+
+    // Apply the remaining (fractional) compensation; the coarse part is already out
+    if (params->apply_freq_offset && (freq_offset_used - freq_offset_coarse) != 0) {
+      f_off_to_comp += freq_offset_used - freq_offset_coarse;
       compensate_freq_offset(params->rxdata, params->nb_antennas_rx, params->rxdata_size, f_off_to_comp, params->sampling_rate);
       f_off_to_comp *= -1;
+      f_off_already_applied = freq_offset_used;
     }
 
     // Extract SSB symbols to frequency domain
@@ -374,6 +590,12 @@ static void copy_search_trace(nr_initial_sync_t *sync_res, const nr_ssb_search_p
   sync_res->trace.sss_second_metric = search_params->sss_res.second_metric;
   sync_res->trace.sss_phase = search_params->sss_res.phase;
   sync_res->trace.sss_freq_offset = search_params->sss_res.freq_offset;
+  sync_res->trace.cfo_method = search_params->cfo_method;
+  sync_res->trace.est_coarse_hz = search_params->est_coarse_hz;
+  sync_res->trace.est_fine_hz = search_params->est_fine_hz;
+  sync_res->trace.est_ffo_pss_hz = search_params->est_ffo_pss_hz;
+  sync_res->trace.est_ffo_cp_hz = search_params->est_ffo_cp_hz;
+  sync_res->trace.est_pss_stage_hz = search_params->est_pss_stage_hz;
   sync_res->trace.initial_freq_offset = initial_freq_offset;
   sync_res->trace.total_freq_offset = initial_freq_offset + search_params->pss_res.freq_offset + search_params->sss_res.freq_offset;
 }
@@ -453,6 +675,7 @@ static void nr_scan_ssb(void *arg)
       .apply_freq_offset = ssbInfo->foFlag,
       .fo_flag = ssbInfo->foFlag,
       .pss_cfo_search = ssbInfo->pssCfoSearch,
+      .coarse_fo = get_nrUE_params()->coarse_fo,
       .rxdataF = rxdataF,
       .pssTime = pssTime,
   };

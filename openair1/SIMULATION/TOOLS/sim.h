@@ -123,6 +123,8 @@ typedef struct {
   bool enable_dynamic_Doppler;
   /// Doppler phase increment (might vary over time, e.g. for LEO satellite)
   float Doppler_phase_inc;
+  /// constant carrier frequency offset (Hz) added to the Doppler of the model (channelmod cfo_hz)
+  double static_cfo_hz;
   /// current Doppler phase of each RX antenna (for continuous phase from one block to the next)
   float *Doppler_phase_cur;
   /// flag indicating if channel direction is UL or DL
@@ -221,7 +223,18 @@ typedef enum {
   EPA_high,
   SAT_LEO_TRANS,
   SAT_LEO_REGEN,
+  // TR 38.811 §6.9.2 NTN-TDL models; the _LEO variants add the 600 km circular-orbit Doppler of SAT_LEO_TRANS
+  NTN_TDL_A,
+  NTN_TDL_B,
+  NTN_TDL_C,
+  NTN_TDL_D,
+  NTN_TDL_A_LEO,
+  NTN_TDL_B_LEO,
+  NTN_TDL_C_LEO,
+  NTN_TDL_D_LEO,
 } SCM_t;
+#define IS_NTN_TDL_MODEL(m) ((m) >= NTN_TDL_A && (m) <= NTN_TDL_D_LEO)
+#define IS_TDL_MODEL(m) (((m) >= TDL_A && (m) <= TDL_E) || IS_NTN_TDL_MODEL(m))
 #define CHANNELMOD_MAP_INIT \
   {"custom",custom},\
   {"SCM_A",SCM_A},\
@@ -258,6 +271,14 @@ typedef enum {
   {"EPA_high",EPA_high},\
   {"SAT_LEO_TRANS",SAT_LEO_TRANS},\
   {"SAT_LEO_REGEN",SAT_LEO_REGEN},\
+  {"NTN_TDL_A",NTN_TDL_A},\
+  {"NTN_TDL_B",NTN_TDL_B},\
+  {"NTN_TDL_C",NTN_TDL_C},\
+  {"NTN_TDL_D",NTN_TDL_D},\
+  {"NTN_TDL_A_LEO",NTN_TDL_A_LEO},\
+  {"NTN_TDL_B_LEO",NTN_TDL_B_LEO},\
+  {"NTN_TDL_C_LEO",NTN_TDL_C_LEO},\
+  {"NTN_TDL_D_LEO",NTN_TDL_D_LEO},\
   {NULL, -1}
 
 #define CONFIG_HLP_SNR     "Set average SNR in dB (for --siml1 option)\n"
@@ -287,6 +308,7 @@ typedef enum {
 #define CHANNELMOD_MODEL_FF_PNAME "forgetfact"
 #define CHANNELMOD_MODEL_CO_PNAME "offset"
 #define CHANNELMOD_MODEL_DT_PNAME "ds_tdl"
+#define CHANNELMOD_MODEL_CFO_PNAME "cfo_hz"
 
 // clang-format off
 #define CHANNELMOD_MODEL_PARAMS_DESC {  \
@@ -297,6 +319,7 @@ typedef enum {
     {CHANNELMOD_MODEL_FF_PNAME,   "channel forget factor ((0 to 1)\n", 0,  .dblptr=NULL,             .defdblval=0,                     TYPE_DOUBLE,    0 }, \
     {CHANNELMOD_MODEL_CO_PNAME,   "channel offset in samps\n",         0,  .iptr=NULL,               .defintval=0,                     TYPE_INT,       0 }, \
     {CHANNELMOD_MODEL_DT_PNAME,   "delay spread for TDL models\n",     0,  .dblptr=NULL,             .defdblval=0,                     TYPE_DOUBLE,    0 }, \
+    {CHANNELMOD_MODEL_CFO_PNAME,  "constant carrier frequency offset in Hz, added to any model Doppler\n", 0, .dblptr=NULL, .defdblval=0, TYPE_DOUBLE, 0 }, \
 }
 // clang-format on
 

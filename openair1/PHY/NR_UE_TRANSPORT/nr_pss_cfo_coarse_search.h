@@ -16,6 +16,8 @@ typedef struct {
   int ofdm_symbol_size;
   const c16_t *pss_time[NUMBER_PSS_SEQUENCE];
   int sampling_rate_hz;
+  bool targeted; // restrict the search to target_nid2 (re-sync, phy-test, neighbour search)
+  int target_nid2;
 } nr_pss_cfo_coarse_search_t;
 
 typedef struct {

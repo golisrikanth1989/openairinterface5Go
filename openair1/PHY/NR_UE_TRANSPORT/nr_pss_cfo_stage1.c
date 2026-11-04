@@ -45,7 +45,7 @@ nr_pss_cfo_search_result_t nr_pss_cfo_search_stage1(const nr_pss_cfo_coarse_sear
 
   uint64_t second_sequence_peak_raw = 0;
   for (int nid2 = 0; nid2 < NUMBER_PSS_SEQUENCE; ++nid2) {
-    if (nid2 == fine.best.nid2)
+    if (nid2 == fine.best.nid2 || search->targeted)
       continue;
     const nr_pss_cfo_hypothesis_t alternative = make_hypothesis(search, fine.best.cfo_hz, nid2);
     const nr_pss_cfo_hypothesis_result_t alternative_result = nr_pss_cfo_evaluate_hypothesis(&alternative);

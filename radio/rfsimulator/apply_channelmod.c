@@ -46,6 +46,9 @@ void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t T
     const double pos_ue_z = radius_earth;
 
     const double c = (double) SPEED_OF_LIGHT;
+    // NTN-TDL *_LEO models use the transparent-satellite geometry of SAT_LEO_TRANS
+    const bool is_transparent = channelDesc->modelid == SAT_LEO_TRANS
+                                || (channelDesc->modelid >= NTN_TDL_A_LEO && channelDesc->modelid <= NTN_TDL_D_LEO);
 
     if (channelDesc->is_uplink) {
       const double dir_ue_sat_x = pos_sat_x - pos_ue_x;
@@ -58,7 +61,7 @@ void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t T
       double dist_sat_gnb = 0;
       double vel_sat_gnb = 0;
       double acc_sat_gnb = 0;
-      if (channelDesc->modelid == SAT_LEO_TRANS) {
+      if (is_transparent) {
         const double t5 = t + 5;
         const double t10 = t + 10;
 
@@ -115,7 +118,7 @@ void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t T
 
       const double f_Doppler_shift_ue_sat = (-vel_ue_sat / c) * channelDesc->center_freq;
       if (channelDesc->enable_dynamic_Doppler)
-        channelDesc->Doppler_phase_inc = 2 * M_PI * f_Doppler_shift_ue_sat / channelDesc->sampling_rate;
+        channelDesc->Doppler_phase_inc = 2 * M_PI * (f_Doppler_shift_ue_sat + channelDesc->static_cfo_hz) / channelDesc->sampling_rate;
 
       if (TS / (unsigned int)channelDesc->sampling_rate != (TS + nbSamples) / (unsigned int)channelDesc->sampling_rate) {
         LOG_I(HW,
@@ -133,7 +136,9 @@ void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t T
 
       const int samples_per_subframe = channelDesc->sampling_rate / 1000;
       const int abs_subframe = TS / samples_per_subframe;
-      if (abs_subframe % 10 == 0) { // update SIB19 information for the next frame
+      // SIB19 follows the satellite only for the SAT_LEO models, whose delay is simulated too
+      const bool sat_model = channelDesc->modelid == SAT_LEO_TRANS || channelDesc->modelid == SAT_LEO_REGEN;
+      if (sat_model && abs_subframe % 10 == 0) { // update SIB19 information for the next frame
         gnb_sat_position_update_t sat_position = {
             .sfn = (abs_subframe / 10 + 1) % 1024,
             .subframe = 0,
@@ -163,7 +168,7 @@ void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t T
       const double vel_sat_ue = (vel_sat_x * dir_sat_ue_x + vel_sat_y * dir_sat_ue_y + vel_sat_z * dir_sat_ue_z) / dist_sat_ue;
 
       double dist_gnb_sat = 0;
-      if (channelDesc->modelid == SAT_LEO_TRANS) {
+      if (is_transparent) {
         const double pos_gnb_x = 0;
         const double pos_gnb_y = 0;
         const double pos_gnb_z = radius_earth;
@@ -181,7 +186,7 @@ void update_channel_model(channel_desc_t *channelDesc, int nbSamples, uint64_t T
 
       const double f_Doppler_shift_sat_ue = (vel_sat_ue / (c - vel_sat_ue)) * channelDesc->center_freq;
       if (channelDesc->enable_dynamic_Doppler)
-        channelDesc->Doppler_phase_inc = 2 * M_PI * f_Doppler_shift_sat_ue / channelDesc->sampling_rate;
+        channelDesc->Doppler_phase_inc = 2 * M_PI * (f_Doppler_shift_sat_ue + channelDesc->static_cfo_hz) / channelDesc->sampling_rate;
 
       if (TS / (unsigned int)channelDesc->sampling_rate != (TS + nbSamples) / (unsigned int)channelDesc->sampling_rate) {
         LOG_I(HW,

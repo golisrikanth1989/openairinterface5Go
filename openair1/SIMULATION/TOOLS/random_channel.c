@@ -261,6 +261,84 @@ static double tdl_e_amps_dB[] = {//-0.03,
 
 #define TDL_E_RICEAN_FACTOR 0.0063096
 
+/* TR 38.811 §6.9.2, Tables 6.9.2-1..4: NTN-TDL-A..D, normalized delays and powers (dB).
+ * Only the Rayleigh (diffuse) components are listed; for the LOS models C and D the specular
+ * component of tap 1 is given separately as its power (dB). The tables are scaled by the
+ * desired RMS delay spread (ds_tdl, TR 38.901 §7.7.3). */
+static const double ntn_tdl_a_delays[] = {0.0, 1.0811, 2.8416};
+static const double ntn_tdl_a_amps_dB[] = {0.0, -4.675, -6.482};
+static const double ntn_tdl_b_delays[] = {0.0, 0.7249, 0.7410, 5.7392};
+static const double ntn_tdl_b_amps_dB[] = {0.0, -1.973, -4.332, -11.914};
+static const double ntn_tdl_c_delays[] = {0.0, 14.8124};
+static const double ntn_tdl_c_amps_dB[] = {-10.618, -23.373};
+#define NTN_TDL_C_LOS_DB (-0.394) // K1 = 10.224 dB
+static const double ntn_tdl_d_delays[] = {0.0, 0.5596, 7.3340};
+static const double ntn_tdl_d_amps_dB[] = {-11.991, -9.887, -16.771};
+#define NTN_TDL_D_LOS_DB (-0.284) // K1 = 11.707 dB
+#define NTN_LEO_SAT_HEIGHT_M 600e3
+
+void tdlModel(int tdl_paths, double *tdl_delays, double *tdl_amps_dB, double DS_TDL, channel_desc_t *chan_desc);
+
+/* Builds an NTN-TDL descriptor. OAI's Ricean model gives the first tap a specular part of power
+ * (1 - ricean_factor) and scales all diffuse taps by ricean_factor, so ricean_factor is the
+ * diffuse share of the total power: 1 for NLOS, 1 - P_LOS/(P_LOS + sum P_diffuse) for LOS. */
+static void ntn_tdl_model(SCM_t model, double DS_TDL, channel_desc_t *chan_desc)
+{
+  const double *d = NULL, *a = NULL;
+  int n = 0;
+  double los_db = -INFINITY;
+#define NTN_TAB(x) (d = ntn_tdl_##x##_delays, a = ntn_tdl_##x##_amps_dB, n = sizeofArray(ntn_tdl_##x##_delays))
+  switch (model) {
+    case NTN_TDL_A:
+    case NTN_TDL_A_LEO:
+      NTN_TAB(a);
+      break;
+    case NTN_TDL_B:
+    case NTN_TDL_B_LEO:
+      NTN_TAB(b);
+      break;
+    case NTN_TDL_C:
+    case NTN_TDL_C_LEO:
+      NTN_TAB(c);
+      los_db = NTN_TDL_C_LOS_DB;
+      break;
+    case NTN_TDL_D:
+    case NTN_TDL_D_LEO:
+      NTN_TAB(d);
+      los_db = NTN_TDL_D_LOS_DB;
+      break;
+    default:
+      AssertFatal(false, "not an NTN-TDL model: %d\n", model);
+  }
+#undef NTN_TAB
+  // tdlModel() scales the delay table in place: give it a private copy
+  double *delays = malloc(n * sizeof(*delays));
+  double *amps_dB = malloc(n * sizeof(*amps_dB));
+  memcpy(delays, d, n * sizeof(*delays));
+  memcpy(amps_dB, a, n * sizeof(*amps_dB));
+  tdlModel(n, delays, amps_dB, DS_TDL, chan_desc);
+  free(amps_dB);
+  double diffuse = 0;
+  for (int i = 0; i < n; i++)
+    diffuse += pow(10, a[i] / 10);
+  const double los = isfinite(los_db) ? pow(10, los_db / 10) : 0;
+  chan_desc->ricean_factor = diffuse / (diffuse + los);
+  if (model >= NTN_TDL_A_LEO) {
+    // common satellite Doppler on all taps (TR 38.811 §6.9.2); the delay stays static because
+    // the sinc tap interpolation cannot carry a propagation delay of several ms
+    chan_desc->sat_height = NTN_LEO_SAT_HEIGHT_M;
+    chan_desc->enable_dynamic_Doppler = true;
+    chan_desc->enable_dynamic_delay = false;
+  }
+  LOG_I(OCM,
+        "%s: %d diffuse taps, DS %.1f ns, diffuse power share %.4f%s\n",
+        map_int_to_str(channelmod_names, model),
+        n,
+        DS_TDL * 1e9,
+        chan_desc->ricean_factor,
+        model >= NTN_TDL_A_LEO ? ", LEO 600 km Doppler" : "");
+}
+
 static double epa_delays[] = { 0,.03,.07,.09,.11,.19,.41};
 static double epa_amps_dB[] = {0.0,-1.0,-2.0,-3.0,-8.0,-17.2,-20.8};
 
@@ -366,6 +444,9 @@ void tdlModel(int  tdl_paths, double *tdl_delays, double *tdl_amps_dB, double DS
   chan_desc->chF            = calloc(nb_tx*nb_rx, sizeof(struct complexd *));
   chan_desc->a              = calloc(chan_desc->nb_taps, sizeof(struct complexd *));
   chan_desc->ricean_factor  = 1.0;
+  // rxAddInput() (rfsimulator) reads the per-antenna Doppler phase of every model
+  if (!chan_desc->Doppler_phase_cur)
+    chan_desc->Doppler_phase_cur = calloc(nb_rx, sizeof(double));
 
   for (int i = 0; i<nb_tx*nb_rx; i++)
     chan_desc->ch[i] = calloc(chan_desc->channel_length, sizeof(struct complexd));
@@ -478,7 +559,7 @@ void get_cexp_doppler(struct complexd *cexp_doppler, channel_desc_t *chan_desc, 
 
 double get_normalization_ch_factor(channel_desc_t *desc)
 {
-  if (!(desc->channel_length > 1 && desc->modelid >= TDL_A && desc->modelid <= TDL_E)) {
+  if (!(desc->channel_length > 1 && IS_TDL_MODEL(desc->modelid))) {
     return 1.0;
   }
 
@@ -761,6 +842,18 @@ channel_desc_t *new_channel_desc_scm(uint8_t nb_tx,
       chan_desc->ricean_factor  = TDL_E_RICEAN_FACTOR;
       tdl_m(e);
       tdlModel(tdl_paths,  tdl_delays, tdl_amps_dB,  DS_TDL, chan_desc);
+      break;
+
+    case NTN_TDL_A:
+    case NTN_TDL_B:
+    case NTN_TDL_C:
+    case NTN_TDL_D:
+    case NTN_TDL_A_LEO:
+    case NTN_TDL_B_LEO:
+    case NTN_TDL_C_LEO:
+    case NTN_TDL_D_LEO:
+      AssertFatal(DS_TDL > 0, "NTN-TDL models need a delay spread: set ds_tdl (seconds), e.g. 100e-9\n");
+      ntn_tdl_model(channel_model, DS_TDL, chan_desc);
       break;
 
     case EPA:
@@ -1816,7 +1909,7 @@ int random_channel(channel_desc_t *desc, uint8_t abstraction_flag) {
     //apply correlation matrix
     //compute acorr = R_sqrt[i] * anew
     bzero(acorr, desc->nb_tx * desc->nb_rx * sizeof(struct complexd));
-    if (desc->modelid >= TDL_A && desc->modelid <= TDL_E) {
+    if (IS_TDL_MODEL(desc->modelid)) {
       for (aatx = 0; aatx < desc->nb_tx; aatx++) {
         for (aarx=0; aarx<desc->nb_rx; aarx++) {
           for (int inside = 0; inside < desc->nb_tx * desc->nb_rx; inside++) {
@@ -2064,7 +2157,7 @@ static void display_channelmodel(channel_desc_t *cd,int debug, telnet_printfunc_
        cd->forgetting_factor);
   prnt("Initial phase: %lf   nb_path: %i \n",
        cd->ip, cd->nb_paths);
-  if (cd->modelid == SAT_LEO_TRANS || cd->modelid == SAT_LEO_REGEN)
+  if (cd->sat_height > 0)
     prnt("satellite orbit height: %f\n", cd->sat_height);
 
   for (int i=0; i<cd->nb_taps ; i++) {
@@ -2279,6 +2372,9 @@ void init_channelmod(void) {
 
 
 int load_channellist(uint8_t nb_tx, uint8_t nb_rx, double sampling_rate, uint64_t center_freq, double channel_bandwidth) {
+  // TDL models draw Gaussian taps (get_normalization_ch_factor()) while being created, before
+  // the device init seeds the RNG
+  randominit();
   paramdef_t achannel_params[] = CHANNELMOD_MODEL_PARAMS_DESC;
   paramlist_def_t channel_list;
   memset(&channel_list,0,sizeof(paramlist_def_t));
@@ -2288,6 +2384,7 @@ int load_channellist(uint8_t nb_tx, uint8_t nb_rx, double sampling_rate, uint64_
   AssertFatal(channel_list.numelt>0, "List %s.%s not found in config file\n",CHANNELMOD_SECTION,channel_list.listname);
   int pindex_NAME = config_paramidx_fromname(achannel_params,numparams, CHANNELMOD_MODEL_NAME_PNAME);
   int pindex_DT = config_paramidx_fromname(achannel_params,numparams, CHANNELMOD_MODEL_DT_PNAME );
+  int pindex_CFO = config_paramidx_fromname(achannel_params, numparams, CHANNELMOD_MODEL_CFO_PNAME);
   int pindex_FF = config_paramidx_fromname(achannel_params,numparams, CHANNELMOD_MODEL_FF_PNAME );
   int pindex_CO = config_paramidx_fromname(achannel_params,numparams, CHANNELMOD_MODEL_CO_PNAME );
   int pindex_PL = config_paramidx_fromname(achannel_params,numparams, CHANNELMOD_MODEL_PL_PNAME );
@@ -2322,6 +2419,10 @@ int load_channellist(uint8_t nb_tx, uint8_t nb_rx, double sampling_rate, uint64_
                                                          *(channel_list.paramarray[i][pindex_NP].dblptr));
     AssertFatal( (channeldesc_p!= NULL), "Could not allocate channel %s type %s \n",*(channel_list.paramarray[i][pindex_NAME].strptr), *(channel_list.paramarray[i][pindex_TYPE].strptr));
     channeldesc_p->model_name = strdup(*(channel_list.paramarray[i][pindex_NAME].strptr));
+    channeldesc_p->static_cfo_hz = *(channel_list.paramarray[i][pindex_CFO].dblptr);
+    channeldesc_p->Doppler_phase_inc = 2 * M_PI * channeldesc_p->static_cfo_hz / sampling_rate;
+    if (channeldesc_p->static_cfo_hz != 0)
+      LOG_I(OCM, "Model %s: constant CFO %.1f Hz\n", channeldesc_p->model_name, channeldesc_p->static_cfo_hz);
     LOG_I(OCM,"Model %s type %s allocated from config file, list %s\n",*(channel_list.paramarray[i][pindex_NAME].strptr),
           *(channel_list.paramarray[i][pindex_TYPE].strptr), modellist_name);
   } /* for loop on channel_list */

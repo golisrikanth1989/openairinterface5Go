@@ -524,6 +524,13 @@ typedef struct {
   int pbch_decode_attempts;
   int initial_freq_offset;
   int total_freq_offset;
+  // CFO estimator chain of the PSS stage (Hz), same fields for every method
+  const char *cfo_method; // pss, cp, int_pss, int_cp (integer search) or grid (CFO-PSS Stage 1)
+  int est_coarse_hz; // integer/grid coarse stage
+  int est_fine_hz; // fine stage of the selected method
+  int est_ffo_pss_hz; // PSS half-symbol estimate (0 for grid)
+  int est_ffo_cp_hz; // CP estimate, when computed (0 for grid)
+  int est_pss_stage_hz; // CFO handed to SSS
 } nr_initial_sync_trace_t;
 
 typedef struct {
@@ -560,7 +567,8 @@ typedef struct {
   bool success;
   int pos;
   int nid2;
-  int freq_offset; // PSS frequency offset estimate
+  int freq_offset; // PSS frequency offset estimate (fractional)
+  int coarse_offset_hz; // integer-CFO estimate from the PSS hypothesis search (--coarse-fo)
   int peak; // PSS correlation peak power
   int avg; // PSS correlation average power
   uint64_t peak_raw;
@@ -602,6 +610,7 @@ typedef struct {
   bool apply_freq_offset; // whether to compensate frequency offset
   bool fo_flag; // frequency offset estimation flag for pss_synchro_nr()
   nr_pss_cfo_search_config_t pss_cfo_search; // enabled only for blind initial access
+  int coarse_fo; // integer-CFO search range in subcarriers (--coarse-fo), 0 = disabled
   void *rxdataF; // Pre-allocated rxdataF buffer
   void *pssTime; // Pre-generated PSS time sequences
   // Output parameters
@@ -613,6 +622,12 @@ typedef struct {
   int pss_cfo_coarse_bins;
   int pss_cfo_fine_bins;
   int pss_cfo_diagnostic_passes;
+  const char *cfo_method;
+  int est_coarse_hz;
+  int est_fine_hz;
+  int est_ffo_pss_hz;
+  int est_ffo_cp_hz;
+  int est_pss_stage_hz;
   sss_detection_result_t sss_res;
   nr_sync_failure_t failure_reason;
 } nr_ssb_search_params_t;

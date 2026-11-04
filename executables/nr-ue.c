@@ -222,7 +222,7 @@ static void log_initial_sync_trace(const syncData_t *syncD, const nr_initial_syn
   const int gscn = syncD->numGscn == 1 ? syncD->gscnInfo[0].gscn : -1;
   const int ssb_first_sc = syncD->numGscn == 1 ? syncD->gscnInfo[0].ssbFirstSC : -1;
   LOG_I(NR_PHY,
-        "INITIAL_SYNC_TRACE_V1,attempt=%" PRIu64 ",rx_timestamp=%" PRId64
+        "INITIAL_SYNC_TRACE_V2,attempt=%" PRIu64 ",rx_timestamp=%" PRId64
         ",cell_detected=%d,failure_code=%d,failure_stage=%s,frame_id=%d,num_gscn=%d,gscn=%d,ssb_first_sc=%d"
         ",pss_success=%d,pss_nid2=%d,pss_position=%d,pss_peak_db=%d,pss_avg_db=%d,pss_peak_raw=%" PRIu64
         ",pss_avg_raw=%" PRIu64 ",pss_second_sequence_peak_raw=%" PRIu64
@@ -230,7 +230,8 @@ static void log_initial_sync_trace(const syncData_t *syncD, const nr_initial_syn
         ",pss_cfo_coarse_bins=%d,pss_cfo_fine_bins=%d,pss_cfo_diagnostic_passes=%d,pss_freq_offset_hz=%d"
         ",sss_success=%d,sss_nid_cell=%d,sss_metric=%d,sss_second_metric=%d,sss_phase=%d,sss_freq_offset_hz=%d"
         ",pbch_attempted=%d,pbch_success=%d,pbch_dmrs_best_metric=%" PRIu64 ",pbch_dmrs_second_metric=%" PRIu64
-        ",pbch_decode_attempts=%d,initial_freq_offset_hz=%d,total_freq_offset_hz=%d,ue_dl_doppler_hz=%.3f\n",
+        ",pbch_decode_attempts=%d,initial_freq_offset_hz=%d,total_freq_offset_hz=%d,ue_dl_doppler_hz=%.3f"
+        ",cfo_method=%s,est_coarse_hz=%d,est_fine_hz=%d,est_ffo_pss_hz=%d,est_ffo_cp_hz=%d,est_pss_stage_hz=%d\n",
         syncD->attempt_id,
         syncD->rx_timestamp,
         ret->cell_detected,
@@ -269,7 +270,13 @@ static void log_initial_sync_trace(const syncData_t *syncD, const nr_initial_syn
         trace->pbch_decode_attempts,
         trace->initial_freq_offset,
         trace->total_freq_offset,
-        UE->dl_Doppler_shift);
+        UE->dl_Doppler_shift,
+        trace->cfo_method ? trace->cfo_method : "none",
+        trace->est_coarse_hz,
+        trace->est_fine_hz,
+        trace->est_ffo_pss_hz,
+        trace->est_ffo_cp_hz,
+        trace->est_pss_stage_hz);
 }
 
 static void UE_synch(void *arg) {

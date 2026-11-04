@@ -69,6 +69,8 @@ nr_pss_cfo_coarse_search_result_t nr_pss_cfo_search_coarse(const nr_pss_cfo_coar
     const int cfo_hz = (int)(-(int64_t)config->coarse_span_hz + (int64_t)bin * config->coarse_step_hz);
     ++result.bins_evaluated;
     for (int nid2 = 0; nid2 < NUMBER_PSS_SEQUENCE; ++nid2) {
+      if (search->targeted && nid2 != search->target_nid2)
+        continue;
       const nr_pss_cfo_hypothesis_t hypothesis = {
           .rxdata = search->rxdata,
           .nb_antennas_rx = search->nb_antennas_rx,
