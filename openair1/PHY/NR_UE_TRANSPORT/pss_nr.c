@@ -256,7 +256,6 @@ nr_pss_info_t pss_search_time_nr(const pss_search_t *p)
         }
       }
     }
-DISTRIBUTORS
     int64_t avg = sum / (sum_count * p->nb_antennas_rx);
     peak_value /= p->nb_antennas_rx;
     bool pss_found =

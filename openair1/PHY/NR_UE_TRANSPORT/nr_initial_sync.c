@@ -168,7 +168,7 @@ static void compensate_freq_offset(c16_t **x, const int nb_antennas_rx, const in
  * Returns the estimate in Hz.  rxdata must still carry the offset to be measured; any
  * offset already compensated in rxdata has to be added back by the caller.
  */
-static int estimate_ffo_vdb_cp(c16_t **rxdata,
+static int estimate_ffo_cp(c16_t **rxdata,
                                int nb_antennas_rx,
                                int ssb_time_offset,
                                int ofdm_symbol_size,
@@ -212,10 +212,10 @@ static void ffo_log_row(bool fo_flag,
                         int peak_db,
                         int avg_db,
                         int ffo_oai_hz,
-                        int ffo_vdb_hz,
+                        int ffo_cp_hz,
                         int ffo_coarse_hz,
                         int ffo_used_hz,
-                        int use_vdb,
+                        int use_cp,
                         int scs_hz,
                         int fft_size,
                         int ncp)
@@ -244,8 +244,8 @@ static void ffo_log_row(bool fo_flag,
     if (ftell(ffo_log_fd) == 0)
       fprintf(ffo_log_fd,
               "t_us,nid2,pss_pos,peak_db,avg_db,corr_db,"
-              "ffo_oai_hz,ffo_vdb_hz,ffo_coarse_hz,ffo_used_hz,"
-              "eps_oai,eps_vdb,method,scs_hz,fft_size,ncp\n");
+              "ffo_oai_hz,ffo_cp_hz,ffo_coarse_hz,ffo_used_hz,"
+              "eps_oai,eps_cp,method,scs_hz,fft_size,ncp\n");
   }
 
   struct timespec ts;
@@ -261,12 +261,12 @@ static void ffo_log_row(bool fo_flag,
           avg_db,
           peak_db - avg_db,
           ffo_oai_hz,
-          ffo_vdb_hz,
+          ffo_cp_hz,
           ffo_coarse_hz,
           ffo_used_hz,
           scs_hz ? (double)ffo_oai_hz / scs_hz : 0.0,
-          scs_hz ? (double)ffo_vdb_hz / scs_hz : 0.0,
-          use_vdb ? "vdb_cp" : "oai_pss",
+          scs_hz ? (double)ffo_cp_hz / scs_hz : 0.0,
+          use_cp ? "cp" : "oai_pss",
           scs_hz,
           fft_size,
           ncp);
@@ -352,7 +352,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
   // Net frequency shift currently applied to params->rxdata (0 on the first iteration).
   // The CP estimator measures what is left in the samples, so this has to be added back.
   int f_off_already_applied = 0;
-  const bool use_vdb = get_nrUE_params()->vbk_cp_ffo != 0;
+  const bool use_cp = get_nrUE_params()->cp_ffo != 0;
   const bool ffo_logging = get_nrUE_params()->ffo_log != NULL;
 
   for (int p = 0; p < NUMBER_PSS_SEQUENCE; p++) {
@@ -398,12 +398,12 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     }
 
     // Fractional frequency offset: OAI's PSS half-symbol estimator (default) or the
-    // Van de Beek cyclic-prefix estimator (--vbk-cp-ffo). Both are computed whenever
+    // Van de Beek cyclic-prefix estimator (--cp-ffo). Both are computed whenever
     // --ffo-log is given, so that a single run yields directly comparable data.
-    int freq_offset_vdb = 0;
-    if (params->fo_flag && (use_vdb || ffo_logging)) {
+    int freq_offset_cp = 0;
+    if (params->fo_flag && (use_cp || ffo_logging)) {
       // the SSB is known to fit in the buffer at this point (checked just above)
-      freq_offset_vdb = estimate_ffo_vdb_cp(params->rxdata,
+      freq_offset_cp = estimate_ffo_cp(params->rxdata,
                                             params->nb_antennas_rx,
                                             ssb_time_offset,
                                             params->ofdm_symbol_size,
@@ -412,7 +412,7 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
     }
     // total = integer part + fractional part
     const int freq_offset_used =
-        freq_offset_coarse + (use_vdb ? freq_offset_vdb : freq_offset_pss);
+        freq_offset_coarse + (use_cp ? freq_offset_cp : freq_offset_pss);
 
     ffo_log_row(params->fo_flag,
                 pss_res->nid2,
@@ -420,10 +420,10 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
                 pss_res->peak,
                 pss_res->avg,
                 freq_offset_pss,
-                freq_offset_vdb,
+                freq_offset_cp,
                 freq_offset_coarse,
                 freq_offset_used,
-                use_vdb,
+                use_cp,
                 params->subcarrier_spacing,
                 params->ofdm_symbol_size,
                 params->nb_prefix_samples);
@@ -432,8 +432,8 @@ bool nr_search_ssb_common(nr_ssb_search_params_t *params)
           "FO estimates: coarse %+d Hz, OAI PSS half-symbol %+d Hz, Van de Beek CP %+d Hz, using %s -> total %+d Hz\n",
           freq_offset_coarse,
           freq_offset_pss,
-          freq_offset_vdb,
-          use_vdb ? "vdb_cp" : "oai_pss",
+          freq_offset_cp,
+          use_cp ? "cp" : "oai_pss",
           freq_offset_used);
 
     // the rest of the chain (SSS refinement, accumulated freqOffset) uses pss_res->freq_offset
